@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+"""Search an IMAP mailbox for messages from a given sender, show a
+compact numbered list, and interactively save the attachments of the
+message you pick.
+
+Credentials (IMAP_HOST, IMAP_USER, IMAP_PASSWORD) are read from a .env
+file next to this script.
+
+Usage:
+  ./salva --from NAME --out DIR
+"""
+import argparse
+import email
+import imaplib
+import os
+import sys
+from email.header import decode_header
+from email.utils import parseaddr, parsedate_to_datetime
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+def load_dotenv(path):
+    values = {}
+    if not os.path.exists(path):
+        return values
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip()
+    return values
+
+
+def decode_str(s):
+    if not s:
+        return ""
+    parts = decode_header(s)
+    out = ""
+    for text, enc in parts:
+        if isinstance(text, bytes):
+            out += text.decode(enc or "utf-8", errors="replace")
+        else:
+            out += text
+    return out
+
+
+def count_attachments(msg):
+    return sum(1 for part in msg.walk() if part.get_filename())
+
+
+def connect(host, user, password):
+    M = imaplib.IMAP4_SSL(host)
+    M.login(user, password)
+    return M
+
+
+def list_mailboxes(M):
+    status, boxes = M.list()
+    names = []
+    if status != "OK":
+        return names
+    for b in boxes:
+        decoded = b.decode(errors="replace")
+        # Format: (\Flags) "/" "Mailbox Name"  -- name may or may not be quoted
+        if '"' in decoded:
+            name = decoded.split('"')[-2]
+        else:
+            name = decoded.split(" ")[-1]
+        names.append(name)
+    return names
+
+
+def search_sender(M, frm):
+    """Return [{box, num, msg}, ...] for every message matching FROM frm,
+    INBOX searched first. The full message is fetched up front so the
+    later save step needs no second round-trip to the server.
+    """
+    boxes = list_mailboxes(M)
+    ordered = ["INBOX"] + [b for b in boxes if b != "INBOX"]
+
+    results = []
+    for box in ordered:
+        try:
+            status, _ = M.select(f'"{box}"', readonly=True)
+        except Exception:
+            continue
+        if status != "OK":
+            continue
+        status, data = M.search(None, "FROM", f'"{frm}"')
+        if status != "OK" or not data[0]:
+            continue
+        for num in data[0].split():
+            num = num.decode()
+            status, msg_data = M.fetch(num, "(BODY.PEEK[])")
+            if status != "OK":
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            results.append({"box": box, "num": num, "msg": msg})
+    return results
+
+
+def format_row(idx, entry):
+    msg = entry["msg"]
+
+    date_str = "?" * 10
+    try:
+        date_str = parsedate_to_datetime(msg.get("Date")).strftime("%Y-%m-%d")
+    except (TypeError, ValueError):
+        pass
+
+    name, addr = parseaddr(msg.get("From") or "")
+    from_display = decode_str(name) or addr
+
+    subj = decode_str(msg.get("Subject"))
+    if len(subj) > 65:
+        subj = subj[:62] + "..."
+
+    n_attach = count_attachments(msg)
+    box_suffix = "" if entry["box"] == "INBOX" else f"  [{entry['box']}]"
+
+    return f"[{idx:>2}] {date_str}  {from_display:<20.20}  {n_attach:>2} att  {subj}{box_suffix}"
+
+
+def save_attachments(msg, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    saved = []
+    for part in msg.walk():
+        filename = part.get_filename()
+        if not filename:
+            continue
+        filename = decode_str(filename)
+        filepath = os.path.join(out_dir, filename)
+        base, ext = os.path.splitext(filepath)
+        i = 1
+        while os.path.exists(filepath):
+            filepath = f"{base}_{i}{ext}"
+            i += 1
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        with open(filepath, "wb") as f:
+            f.write(payload)
+        saved.append(filepath)
+    return saved
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--from", dest="frm", required=True, help="Substring to match in the From header")
+    p.add_argument("--out", required=True, help="Directory to save the chosen message's attachments into")
+    args = p.parse_args()
+
+    env_path = os.path.join(SCRIPT_DIR, ".env")
+    env = load_dotenv(env_path)
+    missing = [k for k in ("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD") if not env.get(k)]
+    if missing:
+        sys.exit(f"Missing {', '.join(missing)} in {env_path}")
+
+    M = connect(env["IMAP_HOST"], env["IMAP_USER"], env["IMAP_PASSWORD"])
+    try:
+        results = search_sender(M, args.frm)
+
+        if not results:
+            sys.exit("No messages found.")
+
+        for i, entry in enumerate(results, start=1):
+            print(format_row(i, entry))
+
+        try:
+            choice = input(f"\nSave attachments of which message? [1-{len(results)}, Enter to cancel]: ").strip()
+        except EOFError:
+            choice = ""
+
+        if not choice:
+            print("Cancelled.")
+            return
+
+        if not choice.isdigit() or not (1 <= int(choice) <= len(results)):
+            sys.exit(f"Invalid choice: {choice!r}")
+
+        entry = results[int(choice) - 1]
+        saved = save_attachments(entry["msg"], args.out)
+
+        if saved:
+            for path in saved:
+                print(f"Saved: {path}")
+        else:
+            print("No attachments found on this message.", file=sys.stderr)
+    finally:
+        M.logout()
+
+
+if __name__ == "__main__":
+    main()

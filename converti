@@ -1,0 +1,263 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = ["pdfplumber", "openpyxl"]
+# ///
+"""
+Build a per-student spreadsheet (name, thesis title, weighted average, lode count)
+from the "Istruzioni seduta di laurea" attachments sent by the segreteria:
+  - a "Registro ... .pdf" with the student list, matricole and thesis titles
+  - a "... presidente ... .zip" with one transcript PDF per student
+
+Usage:
+  ./converti <attachments_dir> [--zip ZIP] [--registro PDF] [--out OUT.xlsx]
+"""
+import argparse
+import glob
+import os
+import re
+import shutil
+import sys
+import tempfile
+import zipfile
+
+import pdfplumber
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
+
+MATR_RE = re.compile(r'^\d{6}$|^\w{5}A$')
+
+ITALIAN_MONTHS = {
+    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
+    "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+}
+
+
+def titlecase(s):
+    """Capitalize each run of letters; leaves digits, punctuation and
+    apostrophes untouched so "3D" and "VULNERABILITA'" come out as
+    "3D" and "Vulnerabilita'" instead of "3d" / "Vulnerabilita'S"-style
+    mangling that str.title() would produce.
+    """
+    return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(), s, flags=re.UNICODE)
+
+
+def full_text(path):
+    text = ""
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            text += (page.extract_text() or "") + "\n"
+    return text
+
+
+def find_one(pattern, directory, label):
+    matches = sorted(glob.glob(os.path.join(directory, pattern)))
+    if len(matches) == 1:
+        return matches[0]
+    if not matches:
+        raise SystemExit(
+            f"Could not find a {label} matching '{pattern}' in {directory}. "
+            f"Pass it explicitly with the corresponding option."
+        )
+    raise SystemExit(
+        f"Found multiple candidates for {label} in {directory}: {matches}. "
+        f"Pass the right one explicitly with the corresponding option."
+    )
+
+
+def parse_session_info(reg_text):
+    course = code = date_iso = None
+    m = re.search(r'Corso di Laurea\s+(.+?)\(([A-Z0-9]+)\)', reg_text)
+    if m:
+        course = re.sub(r'\s*-\s*', ' - ', m.group(1)).strip(' -')
+        code = m.group(2)
+    m = re.search(r'Il giorno \w+\s+(\d{1,2})\s+(\w+)\s+(\d{4})', reg_text)
+    if m:
+        day, month_name, year = m.groups()
+        month = ITALIAN_MONTHS.get(month_name.lower())
+        if month:
+            date_iso = f"{year}-{month:02d}-{int(day):02d}"
+    return course, code, date_iso
+
+
+def parse_registro(path):
+    """Parse the Registro PDF into a list of {matricola, name, title, advisor}.
+
+    The thesis title and the "docenti" (supervisor) names sit in two
+    columns that pdfplumber's linear text extraction interleaves, and
+    long supervisor names wrap onto their own line indented like the
+    title. Word x-position is used to tell wrapped-supervisor lines
+    (indented) apart from title lines (flush with the left margin): a
+    wrapped supervisor line only ever appears before the title starts,
+    so once a title row has been seen for an entry, any further
+    indented row would be unexpected and is ignored.
+    """
+    entries = []
+    with pdfplumber.open(path) as pdf:
+        for page in pdf.pages:
+            words = page.extract_words()
+            if not words:
+                continue
+            rows = {}
+            for w in words:
+                rows.setdefault(round(w['top'], 0), []).append(w)
+
+            current = None
+            for top in sorted(rows.keys()):
+                row_words = sorted(rows[top], key=lambda w: w['x0'])
+                texts = [w['text'] for w in row_words]
+                first_x0 = row_words[0]['x0']
+
+                if any(t == 'VOTO:' for t in texts) and MATR_RE.match(texts[0]):
+                    name_tokens = []
+                    for t in texts[1:]:
+                        if t == 'VOTO:':
+                            break
+                        name_tokens.append(t)
+                    current = {"matricola": texts[0], "name": " ".join(name_tokens), "title": [], "advisor": []}
+                    entries.append(current)
+                    continue
+
+                if texts[0] == 'DOCENTI':
+                    tokens = texts[1:]
+                    if 'NOTE:' in tokens:
+                        tokens = tokens[:tokens.index('NOTE:')]
+                    if current is not None:
+                        current["advisor"].extend(tokens)
+                    continue
+
+                if texts[0] == 'LA' and 'COMMISSIONE:' in texts:
+                    current = None
+                    continue
+
+                if current is None:
+                    continue
+
+                if first_x0 < 40:
+                    current["title"].append(" ".join(texts))
+                elif not current["title"]:
+                    # indented row before the title has started -> wrapped supervisor name
+                    current["advisor"].extend(texts)
+
+    for e in entries:
+        e["title"] = titlecase(" ".join(e["title"]).strip())
+        e["name"] = " ".join(e["name"].split())
+        e["advisor"] = titlecase(" ".join(e["advisor"]))
+    return entries
+
+
+def parse_student_pdf(path):
+    text = full_text(path)
+    matricola = re.search(r'Matr\.\s*(\S+)', text).group(1)
+    avg_m = re.search(r'Media ponderata:\s*([\d,]+)/30\s*_*\s*([\d,]+)/110', text)
+    avg30 = float(avg_m.group(1).replace(",", "."))
+    avg110 = float(avg_m.group(2).replace(",", "."))
+    lode_count = len(re.findall(r'\b\d{2}\s+L\s+\d{2}/\d{2}/\d{4}', text))
+    return matricola, avg30, avg110, lode_count
+
+
+def build_workbook(students, sheet_title):
+    wb = Workbook()
+    ws = wb.active
+    ws.title = sheet_title[:31]  # Excel sheet name limit
+
+    headers = ["Cognome", "Nome", "Titolo Tesi", "Relatore/i", "Media (/30)", "Media (/110)",
+               "N. Lodi", "Voto Finale", "Punti Commissione"]
+    ws.append(headers)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    col_avg110 = get_column_letter(headers.index("Media (/110)") + 1)
+    col_voto = get_column_letter(headers.index("Voto Finale") + 1)
+    col_delta = get_column_letter(headers.index("Punti Commissione") + 1)
+    input_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+
+    for s in students:
+        row = ws.max_row + 1
+        ws.append([s["surname"], s["given"], s["title"], s["advisor"], round(s["avg30"], 3), round(s["avg110"], 3), s["lodi"]])
+        voto_cell = ws.cell(row=row, column=headers.index("Voto Finale") + 1)
+        voto_cell.fill = input_fill
+        delta_cell = ws.cell(row=row, column=headers.index("Punti Commissione") + 1)
+        delta_cell.value = f'=IF({col_voto}{row}="","",{col_voto}{row}-{col_avg110}{row})'
+        for c in (voto_cell, delta_cell):
+            c.number_format = "0.00"
+
+    for i, w in enumerate([14, 16, 80, 24, 12, 12, 9, 12, 16], start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    for row in ws.iter_rows(min_row=2, max_row=ws.max_row, max_col=4):
+        for cell in row:
+            cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+    return wb
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("attachments_dir", help="Folder containing the Registro PDF and the presidente ZIP")
+    p.add_argument("--zip", dest="zip_path", help="Explicit path to the presidente ZIP (if auto-detect is ambiguous)")
+    p.add_argument("--registro", dest="registro_path", help="Explicit path to the Registro PDF (if auto-detect is ambiguous)")
+    p.add_argument("--out", dest="out_path", help="Output .xlsx path (default: auto-named inside attachments_dir)")
+    args = p.parse_args()
+
+    attachments_dir = os.path.abspath(args.attachments_dir)
+
+    registro_path = args.registro_path or find_one("*[Rr]egistro*.pdf", attachments_dir, "Registro PDF")
+    zip_path = args.zip_path or find_one("*.zip", attachments_dir, "presidente ZIP")
+
+    reg_text = full_text(registro_path)
+    registro_entries = parse_registro(registro_path)
+    course, code, date_iso = parse_session_info(reg_text)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(tmpdir)
+
+        student_pdfs = sorted(glob.glob(os.path.join(tmpdir, "**", "*.pdf"), recursive=True))
+        if not student_pdfs:
+            raise SystemExit(f"No PDF files found inside {zip_path}")
+
+        students = []
+        for fn in student_pdfs:
+            matricola, avg30, avg110, lodi = parse_student_pdf(fn)
+            reg = next((r for r in registro_entries if r["matricola"] == matricola), None)
+            if reg is None:
+                print(f"WARNING: no Registro entry for matricola {matricola} ({fn}), skipping", file=sys.stderr)
+                continue
+            name_parts = reg["name"].split()
+            students.append({
+                "surname": titlecase(name_parts[0]),
+                "given": titlecase(" ".join(name_parts[1:])),
+                "title": reg["title"],
+                "advisor": reg["advisor"],
+                "avg30": avg30,
+                "avg110": avg110,
+                "lodi": lodi,
+                "matricola": matricola,
+            })
+
+    if not students:
+        raise SystemExit("No students could be matched between the Registro and the ZIP contents.")
+
+    students.sort(key=lambda s: s["surname"])
+
+    sheet_title = f"Lauree {code or ''} {date_iso or ''}".strip()
+    wb = build_workbook(students, sheet_title)
+
+    if args.out_path:
+        out_path = os.path.abspath(args.out_path)
+    else:
+        suffix = "_".join(x for x in [code, date_iso] if x) or "lauree"
+        out_path = os.path.join(attachments_dir, f"studenti_{suffix}.xlsx")
+
+    wb.save(out_path)
+
+    print(f"Corso: {course or '?'} ({code or '?'}) - seduta del {date_iso or '?'}")
+    print(f"Saved: {out_path}")
+    for s in students:
+        print(f"  {s['surname']:14s} {s['given']:20s} avg={s['avg30']:.3f}/30 ({s['avg110']:.3f}/110) lodi={s['lodi']}")
+
+
+if __name__ == "__main__":
+    main()
