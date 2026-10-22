@@ -12,14 +12,17 @@ from the "Istruzioni seduta di laurea" attachments sent by the segreteria:
 
 Usage:
   ./converti <attachments_dir> [--zip ZIP] [--registro PDF] [--out OUT.xlsx]
+             [--riassunti]
 """
 
 import argparse
 import glob
 import os
 import re
+import ssl
 import sys
 import tempfile
+import urllib.request
 import zipfile
 
 import pdfplumber
@@ -28,6 +31,11 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 MATR_RE = re.compile(r"^\d{6}$|^\w{5}A$")
+
+RIASSUNTI_URL = (
+    "https://www.sedutedilaurea.scienzemfn.unimi.it/view.php?matricola={matricola}"
+)
+RIASSUNTI_UA = "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"
 
 ITALIAN_MONTHS = {
     "gennaio": 1,
@@ -311,6 +319,37 @@ def build_workbook(students, sheet_title):
     return wb
 
 
+def download_riassunti(entries, out_dir):
+    """Save each student's riassunto PDF as <matricola>.pdf in out_dir.
+
+    The server's certificate chain does not verify and it refuses clients
+    that do not look like a browser, so the connection is unverified and
+    sends a Firefox User-Agent. Only public pages are read, nothing is sent.
+    A student who has not uploaded a riassunto gets an HTML notice instead
+    of a PDF, which is reported and not saved.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    for e in entries:
+        url = RIASSUNTI_URL.format(matricola=e["matricola"])
+        request = urllib.request.Request(url, headers={"User-Agent": RIASSUNTI_UA})
+        try:
+            with urllib.request.urlopen(request, context=context, timeout=30) as r:
+                body = r.read()
+        except OSError as err:
+            print(f"  riassunto {e['matricola']}: {err}", file=sys.stderr)
+            continue
+        if not body.startswith(b"%PDF"):
+            print(f"  riassunto {e['matricola']}: non caricato dallo studente")
+            continue
+        path = os.path.join(out_dir, f"{e['matricola']}.pdf")
+        with open(path, "wb") as f:
+            f.write(body)
+        print(f"Saved: {path}")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
@@ -331,6 +370,12 @@ def main():
         "--out",
         dest="out_path",
         help="Output .xlsx path (default: auto-named inside attachments_dir)",
+    )
+    p.add_argument(
+        "--riassunti",
+        action="store_true",
+        help="Also download each student's riassunto PDF into "
+        "<attachments_dir>/riassunti (unverified TLS, see download_riassunti)",
     )
     args = p.parse_args()
 
@@ -432,6 +477,9 @@ def main():
         print(
             f"  {s['surname']:14s} {s['given']:20s} avg={s['avg30']:.3f}/30 ({s['avg110']:.3f}/110) lodi={s['lodi']} erasmus={s['erasmus']:g}"
         )
+
+    if args.riassunti:
+        download_riassunti(registro_entries, os.path.join(attachments_dir, "riassunti"))
 
 
 if __name__ == "__main__":

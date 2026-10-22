@@ -77,6 +77,14 @@ vanno passati esplicitamente con `--registro` / `--zip`.
 ./converti ./istruzioni_seduta_laurea
 ```
 
+Con `--riassunti`, `converti` scarica anche il riassunto di ogni studente del
+Registro (dal sito delle sedute di laurea di Scienze, per matricola) in
+`<cartella>/riassunti/<matricola>.pdf`; uno studente che non lo ha caricato
+viene segnalato e saltato. Il certificato del sito non è verificabile e il sito
+rifiuta i client che non sembrano un browser, quindi la connessione non è
+verificata e dichiara uno User-Agent di Firefox; si leggono solo pagine
+pubbliche e non si invia nulla.
+
 Il file `.xlsx` generato (default `studenti_<codice>_<data>.xlsx` nella stessa
 cartella) contiene, una riga per studente:
 
