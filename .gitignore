@@ -1,3 +1,4 @@
 .env
 __pycache__/
 *.pyc
+istruzioni_seduta_laurea/
