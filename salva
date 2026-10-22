@@ -8,12 +8,15 @@ file next to this script.
 
 Usage:
   ./salva --from NAME --out DIR
+  ./salva --from NAME --links
 """
 
 import argparse
 import email
+import html
 import imaplib
 import os
+import re
 import sys
 from email.header import decode_header
 from email.utils import parseaddr, parsedate_to_datetime
@@ -66,11 +69,9 @@ def list_mailboxes(M):
     for b in boxes:
         decoded = b.decode(errors="replace")
         # Format: (\Flags) "/" "Mailbox Name"  -- name may or may not be quoted
-        if '"' in decoded:
-            name = decoded.split('"')[-2]
-        else:
-            name = decoded.split(" ")[-1]
-        names.append(name)
+        m = re.match(r'\([^)]*\) (?:"[^"]*"|NIL) (.+)$', decoded)
+        if m:
+            names.append(m.group(1).strip('"'))
     return names
 
 
@@ -148,6 +149,26 @@ def save_attachments(msg, out_dir):
     return saved
 
 
+def extract_links(msg):
+    """Return the distinct http(s) URLs in the message's text and HTML
+    parts, in order of appearance (hrefs of the HTML first)."""
+    links = []
+    for part in msg.walk():
+        if part.get_content_type() not in ("text/plain", "text/html"):
+            continue
+        payload = part.get_payload(decode=True)
+        if payload is None:
+            continue
+        text = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        for url in re.findall(
+            r"""href=["'](https?://[^"']+)["']""", text, re.IGNORECASE
+        ):
+            links.append(html.unescape(url))
+        for url in re.findall(r"https?://[^\s<>\"')\]]+", text):
+            links.append(html.unescape(url))
+    return list(dict.fromkeys(links))
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument(
@@ -158,10 +179,16 @@ def main():
     )
     p.add_argument(
         "--out",
-        required=True,
         help="Directory to save the chosen message's attachments into",
     )
+    p.add_argument(
+        "--links",
+        action="store_true",
+        help="Print the links in the chosen message instead of saving attachments",
+    )
     args = p.parse_args()
+    if not args.links and not args.out:
+        p.error("--out is required unless --links is given")
 
     env_path = os.path.join(SCRIPT_DIR, ".env")
     env = load_dotenv(env_path)
@@ -179,9 +206,10 @@ def main():
         for i, entry in enumerate(results, start=1):
             print(format_row(i, entry))
 
+        what = "links" if args.links else "attachments"
         try:
             choice = input(
-                f"\nSave attachments of which message? [1-{len(results)}, Enter to cancel]: "
+                f"\nSave {what} of which message? [1-{len(results)}, Enter to cancel]: "
             ).strip()
         except EOFError:
             choice = ""
@@ -194,6 +222,10 @@ def main():
             sys.exit(f"Invalid choice: {choice!r}")
 
         entry = results[int(choice) - 1]
+        if args.links:
+            for url in extract_links(entry["msg"]):
+                print(url)
+            return
         saved = save_attachments(entry["msg"], args.out)
 
         if saved:

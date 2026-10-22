@@ -45,6 +45,15 @@ Saved: ./istruzioni_seduta_laurea/F1X presidente RIGHINI.zip
 
 Premere Invio senza scrivere nulla annulla senza salvare.
 
+La ricerca copre tutte le cartelle della casella (le altre sono indicate tra
+parentesi quadre). Con `--links` al posto di `--out`, `salva` stampa gli URL
+contenuti nel messaggio scelto (link del testo e dell'HTML) invece di salvarne
+gli allegati:
+
+```
+./salva --from "Luigi Pepe" --links
+```
+
 ## `converti`
 
 Genera un foglio Excel a partire dagli allegati scaricati con `salva`:
