@@ -1,0 +1,16 @@
+[project]
+name = "prepara-sessione-laurea"
+version = "0"
+requires-python = ">=3.12"
+
+[tool.uv]
+package = false
+
+[dependency-groups]
+dev = [
+    "mdformat>=1.0.0",
+    "mdformat-frontmatter>=2.1.2",
+    "mdformat-gfm>=1.0.0",
+    "pre-commit>=4.7.0",
+    "ruff>=0.17.1",
+]

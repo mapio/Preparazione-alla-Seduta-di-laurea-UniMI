@@ -1,0 +1,33 @@
+# setup-formatting 2026-10-22: rules 1
+repos:
+  - repo: local
+    hooks:
+      - id: mdformat
+        name: mdformat
+        entry: uv run --frozen mdformat --wrap 80 --number
+        language: system
+        types: [markdown]
+        # memory notes use [[wiki links]], which mdformat escapes
+        exclude: ^\.claude/memory/
+      # the scripts have no .py extension and converti's `uv run --script`
+      # shebang is not recognised as Python, so they are named
+      - id: ruff-check
+        name: ruff check
+        entry: uv run --frozen ruff check --fix
+        language: system
+        types: [file]
+        files: ^(salva|converti)$
+      - id: ruff-format
+        name: ruff format
+        entry: uv run --frozen ruff format
+        language: system
+        types: [file]
+        files: ^(salva|converti)$
+      # look like the keyboard's "-" but are not: the instructions' Always section
+      - id: keyboard-dashes
+        name: no U+2013 EN DASH or U+2212 MINUS SIGN
+        # pygrep matches bytes: each character's whole UTF-8 sequence, or U+2014 matches
+        entry: '\xe2\x80\x93|\xe2\x88\x92'
+        language: pygrep
+        types: [text]
+        exclude: ^uv\.lock$
