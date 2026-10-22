@@ -13,11 +13,11 @@ from the "Istruzioni seduta di laurea" attachments sent by the segreteria:
 Usage:
   ./converti <attachments_dir> [--zip ZIP] [--registro PDF] [--out OUT.xlsx]
 """
+
 import argparse
 import glob
 import os
 import re
-import shutil
 import sys
 import tempfile
 import zipfile
@@ -27,11 +27,21 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-MATR_RE = re.compile(r'^\d{6}$|^\w{5}A$')
+MATR_RE = re.compile(r"^\d{6}$|^\w{5}A$")
 
 ITALIAN_MONTHS = {
-    "gennaio": 1, "febbraio": 2, "marzo": 3, "aprile": 4, "maggio": 5, "giugno": 6,
-    "luglio": 7, "agosto": 8, "settembre": 9, "ottobre": 10, "novembre": 11, "dicembre": 12,
+    "gennaio": 1,
+    "febbraio": 2,
+    "marzo": 3,
+    "aprile": 4,
+    "maggio": 5,
+    "giugno": 6,
+    "luglio": 7,
+    "agosto": 8,
+    "settembre": 9,
+    "ottobre": 10,
+    "novembre": 11,
+    "dicembre": 12,
 }
 
 
@@ -41,7 +51,12 @@ def titlecase(s):
     "3D" and "Vulnerabilita'" instead of "3d" / "Vulnerabilita'S"-style
     mangling that str.title() would produce.
     """
-    return re.sub(r"[^\W\d_]+", lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(), s, flags=re.UNICODE)
+    return re.sub(
+        r"[^\W\d_]+",
+        lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(),
+        s,
+        flags=re.UNICODE,
+    )
 
 
 def full_text(path):
@@ -91,16 +106,18 @@ def find_registro(directory, explicit_path=None):
 
 
 def is_registro(text):
-    return bool(re.search(r'REGISTRO\s+N\.', text)) and "esame di laurea" in text.lower()
+    return (
+        bool(re.search(r"REGISTRO\s+N\.", text)) and "esame di laurea" in text.lower()
+    )
 
 
 def parse_session_info(reg_text):
     course = code = date_iso = None
-    m = re.search(r'Corso di Laurea\s+(.+?)\(([A-Z0-9]+)\)', reg_text)
+    m = re.search(r"Corso di Laurea\s+(.+?)\(([A-Z0-9]+)\)", reg_text)
     if m:
-        course = re.sub(r'\s*-\s*', ' - ', m.group(1)).strip(' -')
+        course = re.sub(r"\s*-\s*", " - ", m.group(1)).strip(" -")
         code = m.group(2)
-    m = re.search(r'Il giorno \w+\s+(\d{1,2})\s+(\w+)\s+(\d{4})', reg_text)
+    m = re.search(r"Il giorno \w+\s+(\d{1,2})\s+(\w+)\s+(\d{4})", reg_text)
     if m:
         day, month_name, year = m.groups()
         month = ITALIAN_MONTHS.get(month_name.lower())
@@ -136,36 +153,46 @@ def parse_registro(path):
                 continue
             rows = {}
             for w in words:
-                rows.setdefault(round(w['top'], 0), []).append(w)
+                rows.setdefault(round(w["top"], 0), []).append(w)
 
             for top in sorted(rows.keys()):
-                row_words = sorted(rows[top], key=lambda w: w['x0'])
-                texts = [w['text'] for w in row_words]
-                first_x0 = row_words[0]['x0']
+                row_words = sorted(rows[top], key=lambda w: w["x0"])
+                texts = [w["text"] for w in row_words]
+                first_x0 = row_words[0]["x0"]
 
-                if len(texts) == 3 and texts[1] == '/' and texts[0].isdigit() and texts[2].isdigit():
+                if (
+                    len(texts) == 3
+                    and texts[1] == "/"
+                    and texts[0].isdigit()
+                    and texts[2].isdigit()
+                ):
                     # page-footer "N / total" counter, printed bottom-right of every page
                     continue
 
-                if any(t == 'VOTO:' for t in texts) and MATR_RE.match(texts[0]):
+                if any(t == "VOTO:" for t in texts) and MATR_RE.match(texts[0]):
                     name_tokens = []
                     for t in texts[1:]:
-                        if t == 'VOTO:':
+                        if t == "VOTO:":
                             break
                         name_tokens.append(t)
-                    current = {"matricola": texts[0], "name": " ".join(name_tokens), "title": [], "advisor": []}
+                    current = {
+                        "matricola": texts[0],
+                        "name": " ".join(name_tokens),
+                        "title": [],
+                        "advisor": [],
+                    }
                     entries.append(current)
                     continue
 
-                if texts[0] == 'DOCENTI':
+                if texts[0] == "DOCENTI":
                     tokens = texts[1:]
-                    if 'NOTE:' in tokens:
-                        tokens = tokens[:tokens.index('NOTE:')]
+                    if "NOTE:" in tokens:
+                        tokens = tokens[: tokens.index("NOTE:")]
                     if current is not None:
                         current["advisor"].extend(tokens)
                     continue
 
-                if texts[0] == 'LA' and 'COMMISSIONE:' in texts:
+                if texts[0] == "LA" and "COMMISSIONE:" in texts:
                     current = None
                     continue
 
@@ -195,14 +222,14 @@ def is_transcript(text):
 
 def parse_transcript(text):
     """Return (matricola, avg30, avg110, lode_count) from a "libretto" transcript."""
-    m = re.search(r'Matr\.\s*(\S+)', text)
-    avg_m = re.search(r'Media ponderata:\s*([\d,]+)/30\s*_*\s*([\d,]+)/110', text)
+    m = re.search(r"Matr\.\s*(\S+)", text)
+    avg_m = re.search(r"Media ponderata:\s*([\d,]+)/30\s*_*\s*([\d,]+)/110", text)
     if not m or not avg_m:
         return None
     matricola = m.group(1)
     avg30 = float(avg_m.group(1).replace(",", "."))
     avg110 = float(avg_m.group(2).replace(",", "."))
-    lode_count = len(re.findall(r'\b\d{2}\s+L\s+\d{2}/\d{2}/\d{4}', text))
+    lode_count = len(re.findall(r"\b\d{2}\s+L\s+\d{2}/\d{2}/\d{4}", text))
     return matricola, avg30, avg110, lode_count
 
 
@@ -215,8 +242,8 @@ def parse_erasmus_certificate(text):
     e.g. a "-Modulo delibera erasmus incremento voto laurea...pdf" bundled in
     the same ZIP folder as the student's transcript.
     """
-    m = re.search(r'matricola\s+(\w+)', text, re.IGNORECASE)
-    inc_m = re.search(r'INCREMENTO TOTALE:\s*([\d,]+)\s*PUNT[OI]', text, re.IGNORECASE)
+    m = re.search(r"matricola\s+(\w+)", text, re.IGNORECASE)
+    inc_m = re.search(r"INCREMENTO TOTALE:\s*([\d,]+)\s*PUNT[OI]", text, re.IGNORECASE)
     if not m or not inc_m:
         return None
     return m.group(1), float(inc_m.group(1).replace(",", "."))
@@ -228,26 +255,49 @@ def build_workbook(students, sheet_title):
     ws = wb.active
     ws.title = sheet_title[:31]  # Excel sheet name limit
 
-    headers = ["Cognome", "Nome", "Titolo Tesi", "Relatore/i", "Media (/30)", "Media (/110)",
-               "N. Lodi", "Punti Erasmus", "Voto Finale", "Punti Commissione"]
+    headers = [
+        "Cognome",
+        "Nome",
+        "Titolo Tesi",
+        "Relatore/i",
+        "Media (/30)",
+        "Media (/110)",
+        "N. Lodi",
+        "Punti Erasmus",
+        "Voto Finale",
+        "Punti Commissione",
+    ]
     ws.append(headers)
     for cell in ws[1]:
         cell.font = Font(bold=True)
 
     col_avg110 = get_column_letter(headers.index("Media (/110)") + 1)
     col_voto = get_column_letter(headers.index("Voto Finale") + 1)
-    col_delta = get_column_letter(headers.index("Punti Commissione") + 1)
-    input_fill = PatternFill(start_color="FFF9C4", end_color="FFF9C4", fill_type="solid")
+    input_fill = PatternFill(
+        start_color="FFF9C4", end_color="FFF9C4", fill_type="solid"
+    )
 
     for s in students:
         row = ws.max_row + 1
-        ws.append([s["surname"], s["given"], s["title"], s["advisor"], round(s["avg30"], 3), round(s["avg110"], 3),
-                   s["lodi"], s["erasmus"]])
+        ws.append(
+            [
+                s["surname"],
+                s["given"],
+                s["title"],
+                s["advisor"],
+                round(s["avg30"], 3),
+                round(s["avg110"], 3),
+                s["lodi"],
+                s["erasmus"],
+            ]
+        )
         erasmus_cell = ws.cell(row=row, column=headers.index("Punti Erasmus") + 1)
         voto_cell = ws.cell(row=row, column=headers.index("Voto Finale") + 1)
         voto_cell.fill = input_fill
         delta_cell = ws.cell(row=row, column=headers.index("Punti Commissione") + 1)
-        delta_cell.value = f'=IF({col_voto}{row}="","",{col_voto}{row}-{col_avg110}{row})'
+        delta_cell.value = (
+            f'=IF({col_voto}{row}="","",{col_voto}{row}-{col_avg110}{row})'
+        )
         for c in (erasmus_cell, voto_cell, delta_cell):
             c.number_format = "0.00"
 
@@ -263,10 +313,25 @@ def build_workbook(students, sheet_title):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("attachments_dir", help="Folder containing the Registro PDF and the presidente ZIP")
-    p.add_argument("--zip", dest="zip_path", help="Explicit path to the presidente ZIP (if auto-detect is ambiguous)")
-    p.add_argument("--registro", dest="registro_path", help="Explicit path to the Registro PDF (if auto-detect is ambiguous)")
-    p.add_argument("--out", dest="out_path", help="Output .xlsx path (default: auto-named inside attachments_dir)")
+    p.add_argument(
+        "attachments_dir",
+        help="Folder containing the Registro PDF and the presidente ZIP",
+    )
+    p.add_argument(
+        "--zip",
+        dest="zip_path",
+        help="Explicit path to the presidente ZIP (if auto-detect is ambiguous)",
+    )
+    p.add_argument(
+        "--registro",
+        dest="registro_path",
+        help="Explicit path to the Registro PDF (if auto-detect is ambiguous)",
+    )
+    p.add_argument(
+        "--out",
+        dest="out_path",
+        help="Output .xlsx path (default: auto-named inside attachments_dir)",
+    )
     args = p.parse_args()
 
     attachments_dir = os.path.abspath(args.attachments_dir)
@@ -282,7 +347,9 @@ def main():
         with zipfile.ZipFile(zip_path) as zf:
             zf.extractall(tmpdir)
 
-        student_pdfs = sorted(glob.glob(os.path.join(tmpdir, "**", "*.pdf"), recursive=True))
+        student_pdfs = sorted(
+            glob.glob(os.path.join(tmpdir, "**", "*.pdf"), recursive=True)
+        )
         if not student_pdfs:
             raise SystemExit(f"No PDF files found inside {zip_path}")
 
@@ -293,40 +360,58 @@ def main():
             if is_transcript(text):
                 parsed = parse_transcript(text)
                 if parsed is None:
-                    print(f"WARNING: {fn} looks like a transcript but couldn't be parsed, skipping", file=sys.stderr)
+                    print(
+                        f"WARNING: {fn} looks like a transcript but couldn't be parsed, skipping",
+                        file=sys.stderr,
+                    )
                     continue
                 transcripts.append(parsed)
             elif is_erasmus_certificate(text):
                 parsed = parse_erasmus_certificate(text)
                 if parsed is None:
-                    print(f"WARNING: {fn} looks like an Erasmus certificate but couldn't be parsed, skipping", file=sys.stderr)
+                    print(
+                        f"WARNING: {fn} looks like an Erasmus certificate but couldn't be parsed, skipping",
+                        file=sys.stderr,
+                    )
                     continue
                 matricola, punti = parsed
                 erasmus_points[matricola] = punti
             else:
-                print(f"WARNING: {fn} doesn't look like a transcript or Erasmus certificate, skipping", file=sys.stderr)
+                print(
+                    f"WARNING: {fn} doesn't look like a transcript or Erasmus certificate, skipping",
+                    file=sys.stderr,
+                )
 
         students = []
         for matricola, avg30, avg110, lodi in transcripts:
-            reg = next((r for r in registro_entries if r["matricola"] == matricola), None)
+            reg = next(
+                (r for r in registro_entries if r["matricola"] == matricola), None
+            )
             if reg is None:
-                print(f"WARNING: no Registro entry for matricola {matricola}, skipping", file=sys.stderr)
+                print(
+                    f"WARNING: no Registro entry for matricola {matricola}, skipping",
+                    file=sys.stderr,
+                )
                 continue
             name_parts = reg["name"].split()
-            students.append({
-                "surname": titlecase(name_parts[0]),
-                "given": titlecase(" ".join(name_parts[1:])),
-                "title": reg["title"],
-                "advisor": reg["advisor"],
-                "avg30": avg30,
-                "avg110": avg110,
-                "lodi": lodi,
-                "erasmus": erasmus_points.get(matricola, 0),
-                "matricola": matricola,
-            })
+            students.append(
+                {
+                    "surname": titlecase(name_parts[0]),
+                    "given": titlecase(" ".join(name_parts[1:])),
+                    "title": reg["title"],
+                    "advisor": reg["advisor"],
+                    "avg30": avg30,
+                    "avg110": avg110,
+                    "lodi": lodi,
+                    "erasmus": erasmus_points.get(matricola, 0),
+                    "matricola": matricola,
+                }
+            )
 
     if not students:
-        raise SystemExit("No students could be matched between the Registro and the ZIP contents.")
+        raise SystemExit(
+            "No students could be matched between the Registro and the ZIP contents."
+        )
 
     students.sort(key=lambda s: s["surname"])
 
@@ -344,7 +429,9 @@ def main():
     print(f"Corso: {course or '?'} ({code or '?'}) - seduta del {date_iso or '?'}")
     print(f"Saved: {out_path}")
     for s in students:
-        print(f"  {s['surname']:14s} {s['given']:20s} avg={s['avg30']:.3f}/30 ({s['avg110']:.3f}/110) lodi={s['lodi']} erasmus={s['erasmus']:g}")
+        print(
+            f"  {s['surname']:14s} {s['given']:20s} avg={s['avg30']:.3f}/30 ({s['avg110']:.3f}/110) lodi={s['lodi']} erasmus={s['erasmus']:g}"
+        )
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ file next to this script.
 Usage:
   ./salva --from NAME --out DIR
 """
+
 import argparse
 import email
 import imaplib
@@ -85,7 +86,7 @@ def search_sender(M, frm):
     for box in ordered:
         try:
             status, _ = M.select(f'"{box}"', readonly=True)
-        except Exception:
+        except imaplib.IMAP4.error:
             continue
         if status != "OK":
             continue
@@ -149,8 +150,17 @@ def save_attachments(msg, out_dir):
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--from", dest="frm", required=True, help="Substring to match in the From header")
-    p.add_argument("--out", required=True, help="Directory to save the chosen message's attachments into")
+    p.add_argument(
+        "--from",
+        dest="frm",
+        required=True,
+        help="Substring to match in the From header",
+    )
+    p.add_argument(
+        "--out",
+        required=True,
+        help="Directory to save the chosen message's attachments into",
+    )
     args = p.parse_args()
 
     env_path = os.path.join(SCRIPT_DIR, ".env")
@@ -170,7 +180,9 @@ def main():
             print(format_row(i, entry))
 
         try:
-            choice = input(f"\nSave attachments of which message? [1-{len(results)}, Enter to cancel]: ").strip()
+            choice = input(
+                f"\nSave attachments of which message? [1-{len(results)}, Enter to cancel]: "
+            ).strip()
         except EOFError:
             choice = ""
 
