@@ -57,14 +57,46 @@ def titlecase(s):
     """Capitalize each run of letters; leaves digits, punctuation and
     apostrophes untouched so "3D" and "VULNERABILITA'" come out as
     "3D" and "Vulnerabilita'" instead of "3d" / "Vulnerabilita'S"-style
-    mangling that str.title() would produce.
+    mangling that str.title() would produce. A run right after an
+    elision apostrophe stays lowercase ("Dell'attacco", not "Dell'Attacco").
     """
-    return re.sub(
-        r"[^\W\d_]+",
-        lambda m: m.group(0)[:1].upper() + m.group(0)[1:].lower(),
-        s,
-        flags=re.UNICODE,
-    )
+
+    def cap(m):
+        word = m.group(0)
+        after_elision = (
+            m.start() >= 2 and s[m.start() - 1] == "'" and s[m.start() - 2].isalpha()
+        )
+        return word.lower() if after_elision else word[:1].upper() + word[1:].lower()
+
+    return re.sub(r"[^\W\d_]+", cap, s, flags=re.UNICODE)
+
+
+# Words the segreteria's Registro prints run together; the PDF itself is wrong.
+TITLE_TYPOS = {
+    "INTELLIGENZAARTIFICIALE": "INTELLIGENZA ARTIFICIALE",
+    "FUNZIONICRITTOGRAFICHE": "FUNZIONI CRITTOGRAFICHE",
+}
+
+
+def join_title_lines(lines):
+    """Join the wrapped lines of a Registro title. A line ending in a hyphen
+    continues the compound word ("PROTEIN-" "LIGAND"); one ending in a lone
+    L or D lost its elision apostrophe ("E L" "ANALISI" is "E L'ANALISI").
+    Known run-together words of the Registro are split (TITLE_TYPOS).
+    """
+    title = ""
+    for line in lines:
+        if not title:
+            title = line
+        elif title.endswith("-"):
+            title += line
+        elif re.search(r"(?:^|\s)[LD]$", title) and line[:1] in "AEIOUÀÈÉÌÒÙ":
+            title += "'" + line
+        else:
+            title += " " + line
+    for typo, fixed in TITLE_TYPOS.items():
+        title = title.replace(typo, fixed)
+    return title.strip()
 
 
 def full_text(path):
@@ -214,7 +246,7 @@ def parse_registro(path):
                     current["advisor"].extend(texts)
 
     for e in entries:
-        e["title"] = titlecase(" ".join(e["title"]).strip())
+        e["title"] = titlecase(join_title_lines(e["title"]))
         e["name"] = " ".join(e["name"].split())
         e["advisor"] = titlecase(" ".join(e["advisor"]))
     return entries
