@@ -24,6 +24,7 @@ import sys
 import tempfile
 import urllib.request
 import zipfile
+from datetime import datetime
 
 import pdfplumber
 from openpyxl import Workbook
@@ -261,7 +262,8 @@ def is_transcript(text):
 
 
 def parse_transcript(text):
-    """Return (matricola, avg30, avg110, lode_count) from a "libretto" transcript."""
+    """Return (matricola, avg30, avg110, lode_count, exams) from a "libretto"
+    transcript; exams is parse_exams's list."""
     m = re.search(r"Matr\.\s*(\S+)", text)
     avg_m = re.search(r"Media ponderata:\s*([\d,]+)/30\s*_*\s*([\d,]+)/110", text)
     if not m or not avg_m:
@@ -270,7 +272,58 @@ def parse_transcript(text):
     avg30 = float(avg_m.group(1).replace(",", "."))
     avg110 = float(avg_m.group(2).replace(",", "."))
     lode_count = len(re.findall(r"\b\d{2}\s+L\s+\d{2}/\d{2}/\d{4}", text))
-    return matricola, avg30, avg110, lode_count
+    return matricola, avg30, avg110, lode_count, parse_exams(text)
+
+
+EXAM_START_RE = re.compile(r"^(\d{2})\s+(\S+?)-?\s+(.*)$")
+EXAM_TAIL_RE = re.compile(
+    r"(?:^|\s)(\d{2}|[A-Z]{2})\s+(L\s+)?(\d{2}/\d{2}/\d{4})(?:\s+(CV))?\b.*?(\d+,\d{2})\s*$"
+)
+
+
+def parse_exams(text):
+    """Return the exams of a "libretto" as a list of dicts with code,
+    description, vote (int, or None for an idoneita), lode, idoneo,
+    convalidato (the "CV" flag), date (datetime.date) and credits (float).
+
+    A row starts with its number and code ("04 F1X0F- ...") and ends at the
+    line carrying the vote, the date and the credits; a long description wraps
+    onto the lines in between. The dot leaders that pad the description are
+    dropped. Parsing stops at "Totale crediti".
+    """
+    exams = []
+    current = None
+    for line in text.splitlines():
+        line = line.strip()
+        if line.startswith("Totale crediti"):
+            break
+        start = EXAM_START_RE.match(line)
+        if start:
+            current = {"code": start.group(2), "parts": []}
+            line = start.group(3)
+        elif current is None:
+            continue
+        tail = EXAM_TAIL_RE.search(line)
+        desc = line[: tail.start()] if tail else line
+        desc = re.sub(r"\.+\s*$", "", desc.strip()).strip()
+        if desc:
+            current["parts"].append(desc)
+        if tail:
+            vote, lode, date, convalida, credits = tail.groups()
+            exams.append(
+                {
+                    "code": current["code"],
+                    "description": " ".join(current["parts"]),
+                    "vote": int(vote) if vote.isdigit() else None,
+                    "lode": bool(lode),
+                    "idoneo": not vote.isdigit(),
+                    "convalidato": bool(convalida),
+                    "date": datetime.strptime(date, "%d/%m/%Y").date(),
+                    "credits": float(credits.replace(",", ".")),
+                }
+            )
+            current = None
+    return exams
 
 
 def is_erasmus_certificate(text):
@@ -348,7 +401,93 @@ def build_workbook(students, sheet_title):
         for cell in row:
             cell.alignment = Alignment(wrap_text=True, vertical="top")
 
+    used_names = {ws.title}
+    for s in students:
+        add_exam_sheet(wb, s, used_names)
+
     return wb
+
+
+EXAM_HEADERS = [
+    "Codice",
+    "Esame",
+    "Voto",
+    "Lode",
+    "Idoneità",
+    "Convalida",
+    "Data",
+    "CFU",
+]
+
+
+def add_exam_sheet(wb, student, used_names):
+    """Add the sheet listing the student's exams, one row each in the order of
+    the libretto, with the weighted average recomputed from the rows (a lode
+    counts as its vote, 30; an idoneita has no vote and no weight)."""
+    name = re.sub(r"[\[\]:*?/\\]", " ", f"{student['surname']} {student['given']}")
+    name = name.strip("'")[:31]
+    if name in used_names:
+        name = f"{name[:24]} {student['matricola']}"[:31]
+    used_names.add(name)
+
+    ws = wb.create_sheet(name)
+    ws.append(EXAM_HEADERS)
+    for cell in ws[1]:
+        cell.font = Font(bold=True)
+
+    for e in student["exams"]:
+        ws.append(
+            [
+                e["code"],
+                re.sub(
+                    r"\b(Ii|Iii|Iv)\b",
+                    lambda m: m.group(1).upper(),
+                    titlecase(e["description"]),
+                ),
+                e["vote"],
+                "L" if e["lode"] else None,
+                "sì" if e["idoneo"] else None,
+                "CV" if e["convalidato"] else None,
+                e["date"],
+                e["credits"],
+            ]
+        )
+        ws.cell(row=ws.max_row, column=7).number_format = "DD/MM/YYYY"
+
+    first, last = 2, ws.max_row
+    votes = f"C{first}:C{last}"
+    credits = f"H{first}:H{last}"
+    ws.append([])
+    ws.append(
+        [
+            "Media ponderata /30",
+            None,
+            f'=SUMPRODUCT({votes},{credits})/SUMIF({votes},">0",{credits})',
+        ]
+    )
+    ws.append(
+        [
+            "Media ponderata /110",
+            None,
+            f"=C{ws.max_row}*110/30",
+        ]
+    )
+    ws.append(
+        [
+            "Dal libretto /30, /110",
+            None,
+            round(student["avg30"], 3),
+            round(student["avg110"], 3),
+        ]
+    )
+    for row in ws.iter_rows(min_row=ws.max_row - 2, max_row=ws.max_row):
+        row[0].font = Font(bold=True)
+        for cell in row[2:4]:
+            cell.number_format = "0.000"
+
+    for letter, width in zip("ABCDEFGH", [22, 60, 8, 7, 10, 11, 12, 8]):
+        ws.column_dimensions[letter].width = width
+    ws.freeze_panes = "A2"
 
 
 def download_riassunti(entries, out_dir):
@@ -460,7 +599,7 @@ def main():
                 )
 
         students = []
-        for matricola, avg30, avg110, lodi in transcripts:
+        for matricola, avg30, avg110, lodi, exams in transcripts:
             reg = next(
                 (r for r in registro_entries if r["matricola"] == matricola), None
             )
@@ -482,6 +621,7 @@ def main():
                     "lodi": lodi,
                     "erasmus": erasmus_points.get(matricola, 0),
                     "matricola": matricola,
+                    "exams": exams,
                 }
             )
 

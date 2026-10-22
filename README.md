@@ -107,6 +107,13 @@ rispetto alla media ponderata (`Voto Finale - Media (/110)`), utile per
 verificare a colpo d'occhio quanto ci si è discostati dalla media prima di
 eventuali lodi/Erasmus. Resta vuoto finché `Voto Finale` non è compilato.
 
+Dopo il foglio riepilogativo c'è un foglio per studente, intitolato con il suo
+nome, con una riga per esame nell'ordine del libretto: codice, esame, voto,
+lode, idoneità (gli esami senza voto), convalida (`CV`), data e CFU. In fondo la
+media ponderata /30 e /110 è ricalcolata con una formula dai voti della tabella
+(la lode vale 30, le idoneità non pesano), accanto a quella stampata sul
+libretto.
+
 ## Flusso tipico
 
 ```
